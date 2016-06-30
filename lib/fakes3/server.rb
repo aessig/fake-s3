@@ -9,7 +9,6 @@ require 'fakes3/xml_adapter'
 require 'fakes3/bucket_query'
 require 'fakes3/unsupported_operation'
 require 'fakes3/errors'
-require 'ipaddr'
 
 module FakeS3
   class Request
@@ -453,7 +452,7 @@ module FakeS3
       s_req.path = webrick_req.path
       s_req.is_path_style = true
 
-      if !@root_hostnames.include?(host) && !(IPAddr.new(host) rescue nil)
+      if !@root_hostnames.include?(host)
         s_req.bucket = host.split(".")[0]
         s_req.is_path_style = false
       end
@@ -478,17 +477,23 @@ module FakeS3
       return s_req
     end
 
+    # Strips any of a set of characters from the start and end of a string.
+    def strip(string, strip_chars)
+      chars = Regexp.escape(strip_chars)
+      string.gsub(/\A[#{chars}]+|[#{chars}]+\z/, "")
+    end
+
     def parse_complete_multipart_upload request
       parts_xml   = ""
       request.body { |chunk| parts_xml << chunk }
 
       # TODO: I suck at parsing xml
-      parts_xml = parts_xml.scan /\<Part\>.*?<\/Part\>/m
+      parts_xml = parts_xml.scan /<Part>.*?<\/Part>/m
 
       parts_xml.collect do |xml|
         {
-          number: xml[/\<PartNumber\>(\d+)\<\/PartNumber\>/, 1].to_i,
-          etag:   xml[/\<ETag\>\"(.+)\"\<\/ETag\>/, 1]
+          number: xml[/<PartNumber>(\d+)<\/PartNumber>/, 1].to_i,
+          etag:   strip(xml[/<ETag>(.+)<\/ETag>/, 1], "\"") # Strip quotation marks if present
         }
       end
     end
