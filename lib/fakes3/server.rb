@@ -4,6 +4,7 @@ require 'webrick/https'
 require 'openssl'
 require 'securerandom'
 require 'cgi'
+require 'fakes3/util'
 require 'fakes3/file_store'
 require 'fakes3/xml_adapter'
 require 'fakes3/bucket_query'
@@ -25,9 +26,9 @@ module FakeS3
     DELETE_OBJECT = "DELETE_OBJECT"
     DELETE_BUCKET = "DELETE_BUCKET"
 
-    attr_accessor :bucket,:object,:type,:src_bucket,
-                  :src_object,:method,:webrick_request,
-                  :path,:is_path_style,:query,:http_verb
+    attr_accessor :bucket, :object, :type, :src_bucket,
+                  :src_object, :method, :webrick_request,
+                  :path, :is_path_style, :query, :http_verb
 
     def inspect
       puts "-----Inspect FakeS3 Request"
@@ -76,7 +77,7 @@ module FakeS3
           query = {
             :marker => s_req.query["marker"] ? s_req.query["marker"].to_s : nil,
             :prefix => s_req.query["prefix"] ? s_req.query["prefix"].to_s : nil,
-            :max_keys => s_req.query["max_keys"] ? s_req.query["max_keys"].to_s : nil,
+            :max_keys => s_req.query["max-keys"] ? s_req.query["max-keys"].to_i : nil,
             :delimiter => s_req.query["delimiter"] ? s_req.query["delimiter"].to_s : nil
           }
           bq = bucket_obj.query_for_range(query)
@@ -88,10 +89,10 @@ module FakeS3
         end
       when 'GET_ACL'
         response.status = 200
-        response.body = XmlAdapter.acl()
+        response.body = XmlAdapter.acl
         response['Content-Type'] = 'application/xml'
       when 'GET'
-        real_obj = @store.get_object(s_req.bucket,s_req.object,request)
+        real_obj = @store.get_object(s_req.bucket, s_req.object, request)
         if !real_obj
           response.status = 404
           response.body = XmlAdapter.error_no_such_key(s_req.object)
@@ -116,9 +117,16 @@ module FakeS3
 
         response.status = 200
         response['Content-Type'] = real_obj.content_type
+
+        if real_obj.content_encoding
+          response.header['X-Content-Encoding'] = real_obj.content_encoding
+          response.header['Content-Encoding'] = real_obj.content_encoding
+        end
+
+        response['Content-Disposition'] = real_obj.content_disposition if real_obj.content_disposition
         stat = File::Stat.new(real_obj.io.path)
 
-        response['Last-Modified'] = Time.iso8601(real_obj.modified_date).httpdate()
+        response['Last-Modified'] = Time.iso8601(real_obj.modified_date).httpdate
         response.header['ETag'] = "\"#{real_obj.md5}\""
         response['Accept-Ranges'] = "bytes"
         response['Last-Ranges'] = "bytes"
@@ -131,7 +139,8 @@ module FakeS3
         content_length = stat.size
 
         # Added Range Query support
-        if range = request.header["range"].first
+        range = request.header["range"].first
+        if range
           response.status = 206
           if range =~ /bytes=(\d*)-(\d*)/
             start = $1.to_i
@@ -154,13 +163,14 @@ module FakeS3
         response['Content-Length'] = File::Stat.new(real_obj.io.path).size
         if s_req.http_verb == 'HEAD'
           response.body = ""
+	        real_obj.io.close
         else
           response.body = real_obj.io
         end
       end
     end
 
-    def do_PUT(request,response)
+    def do_PUT(request, response)
       s_req = normalize_request(request)
       query = CGI::parse(request.request_uri.query || "")
 
@@ -173,7 +183,7 @@ module FakeS3
 
       case s_req.type
       when Request::COPY
-        object = @store.copy_object(s_req.src_bucket,s_req.src_object,s_req.bucket,s_req.object,request)
+        object = @store.copy_object(s_req.src_bucket, s_req.src_object, s_req.bucket, s_req.object, request)
         response.body = XmlAdapter.copy_object_result(object)
       when Request::STORE
         bucket_obj = @store.get_bucket(s_req.bucket)
@@ -182,7 +192,7 @@ module FakeS3
           bucket_obj = @store.create_bucket(s_req.bucket)
         end
 
-        real_obj = @store.store_object(bucket_obj,s_req.object,s_req.webrick_request)
+        real_obj = @store.store_object(bucket_obj, s_req.object, s_req.webrick_request)
         response.header['ETag'] = "\"#{real_obj.md5}\""
       when Request::CREATE_BUCKET
         @store.create_bucket(s_req.bucket)
@@ -257,7 +267,7 @@ module FakeS3
 
         response.body = XmlAdapter.complete_multipart_result real_obj
       elsif request.content_type =~ /^multipart\/form-data; boundary=(.+)/
-        key=request.query['key']
+        key = request.query['key']
 
         success_action_redirect = request.query['success_action_redirect']
         success_action_status   = request.query['success_action_status']
@@ -272,9 +282,14 @@ module FakeS3
         response['Etag'] = "\"#{real_obj.md5}\""
 
         if success_action_redirect
-          response.status      = 307
+          object_params = [ [ :bucket, s_req.bucket ], [ :key, key ] ]
+          location_uri = URI.parse(success_action_redirect)
+          original_location_params = URI.decode_www_form(String(location_uri.query))
+          location_uri.query = URI.encode_www_form(original_location_params + object_params)
+
+          response.status      = 303
           response.body        = ""
-          response['Location'] = success_action_redirect
+          response['Location'] = location_uri.to_s
         else
           response.status = success_action_status || 204
           if response.status == "201"
@@ -299,7 +314,7 @@ module FakeS3
       response['Access-Control-Expose-Headers'] = 'ETag'
     end
 
-    def do_DELETE(request,response)
+    def do_DELETE(request, response)
       s_req = normalize_request(request)
 
       case s_req.type
@@ -319,13 +334,13 @@ module FakeS3
 
       response['Access-Control-Allow-Origin']   = '*'
       response['Access-Control-Allow-Methods']  = 'PUT, POST, HEAD, GET, OPTIONS'
-      response['Access-Control-Allow-Headers']  = 'Accept, Content-Type, Authorization, Content-Length, ETag'
+      response['Access-Control-Allow-Headers']  = 'Accept, Content-Type, Authorization, Content-Length, ETag, X-CSRF-Token, Content-Disposition'
       response['Access-Control-Expose-Headers'] = 'ETag'
     end
 
     private
 
-    def normalize_delete(webrick_req,s_req)
+    def normalize_delete(webrick_req, s_req)
       path = webrick_req.path
       path_len = path.size
       query = webrick_req.query
@@ -352,7 +367,7 @@ module FakeS3
       end
     end
 
-    def normalize_get(webrick_req,s_req)
+    def normalize_get(webrick_req, s_req)
       path = webrick_req.path
       path_len = path.size
       query = webrick_req.query
@@ -381,7 +396,7 @@ module FakeS3
       end
     end
 
-    def normalize_put(webrick_req,s_req)
+    def normalize_put(webrick_req, s_req)
       path = webrick_req.path
       path_len = path.size
       if path == "/"
@@ -431,11 +446,10 @@ module FakeS3
       path_len = path.size
 
       s_req.path = webrick_req.query['key']
-
       s_req.webrick_request = webrick_req
 
       if s_req.is_path_style
-        elems = path[1,path_len].split("/")
+        elems = path[1, path_len].split("/")
         s_req.bucket = elems[0]
         s_req.object = elems[1..-1].join('/') if elems.size >= 2
       else
@@ -477,6 +491,7 @@ module FakeS3
       return s_req
     end
 
+<<<<<<< HEAD
     # Strips any of a set of characters from the start and end of a string.
     def strip(string, strip_chars)
       chars = Regexp.escape(strip_chars)
@@ -489,11 +504,23 @@ module FakeS3
 
       # TODO: I suck at parsing xml
       parts_xml = parts_xml.scan /<Part>.*?<\/Part>/m
+=======
+    def parse_complete_multipart_upload(request)
+      parts_xml   = ""
+      request.body { |chunk| parts_xml << chunk }
+
+      # TODO: improve parsing xml
+      parts_xml = parts_xml.scan(/<Part>.*?<\/Part>/m)
+>>>>>>> jubos/master
 
       parts_xml.collect do |xml|
         {
           number: xml[/<PartNumber>(\d+)<\/PartNumber>/, 1].to_i,
+<<<<<<< HEAD
           etag:   strip(xml[/<ETag>(.+)<\/ETag>/, 1], "\"") # Strip quotation marks if present
+=======
+          etag:   FakeS3::Util.strip_before_and_after(xml[/\<ETag\>(.+)<\/ETag>/, 1], '"')
+>>>>>>> jubos/master
         }
       end
     end
@@ -511,7 +538,7 @@ module FakeS3
 
 
   class Server
-    def initialize(address,port,store,hostname,ssl_cert_path,ssl_key_path)
+    def initialize(address, port, store, hostname, ssl_cert_path, ssl_key_path, extra_options={})
       @address = address
       @port = port
       @store = store
@@ -531,12 +558,22 @@ module FakeS3
           }
         )
       end
+
+      if extra_options[:quiet]
+        webrick_config.merge!(
+          :Logger => WEBrick::Log.new("/dev/null"),
+          :AccessLog => []
+        )
+      end
+
       @server = WEBrick::HTTPServer.new(webrick_config)
     end
 
     def serve
-      @server.mount "/", Servlet, @store,@hostname
-      trap "INT" do @server.shutdown end
+      @server.mount "/", Servlet, @store, @hostname
+      shutdown = proc { @server.shutdown }
+      trap "INT", &shutdown
+      trap "TERM", &shutdown
       @server.start
     end
 
