@@ -24,7 +24,7 @@ class S3CmdTest < Test::Unit::TestCase
       end
     end
     output = `#{@s3cmd} put /tmp/fakes3_upload s3://s3cmd_bucket/upload`
-    assert_match(/upload/,output)
+    assert_match(/stored/,output)
 
     FileUtils.rm("/tmp/fakes3_upload")
   end
@@ -36,7 +36,7 @@ class S3CmdTest < Test::Unit::TestCase
       end
     end
     output = `#{@s3cmd} put /tmp/fakes3_acl_upload s3://s3cmd_bucket/acl_upload`
-    assert_match(/upload/,output)
+    assert_match(/stored/,output)
 
     output = `#{@s3cmd} --force setacl -P s3://s3cmd_bucket/acl_upload`
   end

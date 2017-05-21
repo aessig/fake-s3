@@ -1,6 +1,4 @@
 require 'test/unit'
-require 'test/unit/assertions'
-require 'mocha/test_unit'
 require 'rubygems'
 require 'bundler/setup'
 require 'fakes3'
